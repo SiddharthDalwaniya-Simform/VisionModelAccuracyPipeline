@@ -1,0 +1,4 @@
+config.py
+test_videos/
+test_results.xlsx
+/__pycache__/
