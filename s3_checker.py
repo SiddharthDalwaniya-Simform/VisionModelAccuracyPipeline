@@ -28,11 +28,71 @@ S3_RETRY_DELAY = 5  # seconds
 class S3EventChecker:
 
     def __init__(self):
-        self.s3 = boto3.client("s3")
+        self.s3 = self._make_s3_client()
         self.tunnel = None
         self.conn = None
         self._start_tunnel()
         self._connect_db()
+
+    def _make_s3_client(self):
+        """Build a boto3 S3 client using env-specific credentials if provided."""
+        kwargs = {"region_name": config.AWS_REGION}
+        if config.AWS_ACCESS_KEY_ID and config.AWS_ACCESS_KEY_ID != "CHANGE_ME":
+            kwargs["aws_access_key_id"] = config.AWS_ACCESS_KEY_ID
+            kwargs["aws_secret_access_key"] = config.AWS_SECRET_ACCESS_KEY
+            log.debug("S3 client using explicit credentials for region %s", config.AWS_REGION)
+        else:
+            log.debug("S3 client using default credential chain (IAM role / ~/.aws/credentials)")
+        return boto3.client("s3", **kwargs)
+
+    def test_connections(self) -> bool:
+        """
+        Preflight check: verify SSH tunnel, DB, and S3 are all reachable.
+        Logs a clear PASS/FAIL per service. Returns True only if all pass.
+        """
+        log.info("")
+        log.info("─" * 50)
+        log.info("  PREFLIGHT CONNECTION CHECK  [env=%s]", config.ENV)
+        log.info("─" * 50)
+        all_ok = True
+
+        # ── SSH Tunnel ──────────────────────────────────────────
+        if self.tunnel and self.tunnel.is_active:
+            log.info("  [PASS] SSH tunnel  →  %s:%d",
+                     config.SSH_TUNNEL_HOST, config.SSH_TUNNEL_PORT)
+        else:
+            log.error("  [FAIL] SSH tunnel  →  %s:%d  (not active)",
+                      config.SSH_TUNNEL_HOST, config.SSH_TUNNEL_PORT)
+            all_ok = False
+
+        # ── PostgreSQL ───────────────────────────────────────────
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM %s WHERE camera_id = %%s" % config.DB_TABLE,
+                            (config.DB_CAMERA_ID,))
+                count = cur.fetchone()[0]
+            log.info("  [PASS] PostgreSQL  →  %s/%s  (camera_id=%d, existing rows=%d)",
+                     config.DB_HOST, config.DB_NAME, config.DB_CAMERA_ID, count)
+        except Exception as exc:
+            log.error("  [FAIL] PostgreSQL  →  %s", exc)
+            all_ok = False
+
+        # ── S3 ───────────────────────────────────────────────────
+        try:
+            self.s3.head_bucket(Bucket=config.S3_BUCKET)
+            log.info("  [PASS] S3 bucket   →  s3://%s", config.S3_BUCKET)
+        except Exception as exc:
+            log.error("  [FAIL] S3 bucket   →  s3://%s  (%s)", config.S3_BUCKET, exc)
+            all_ok = False
+
+        log.info("─" * 50)
+        if all_ok:
+            log.info("  All checks passed — ready to run.")
+        else:
+            log.error("  One or more checks FAILED — fix the issues above before running.")
+        log.info("─" * 50)
+        log.info("")
+        return all_ok
 
     def _start_tunnel(self):
         """Open SSH tunnel to the database server."""
@@ -102,29 +162,55 @@ class S3EventChecker:
             rows = cur.fetchall()
         return [dict(r) for r in rows]
 
-    def check_for_events(self, stream_start_time: datetime, timeout: float) -> list[dict]:
+    def check_for_events(
+        self,
+        stream_start_time: datetime,
+        timeout: float,
+        stop_on_first_event: bool = True,
+    ) -> list[dict]:
         """
         Poll the database for events created after stream_start_time.
         Polls every POLL_INTERVAL seconds for up to `timeout` seconds.
         Returns list of new events (dicts with video_s3_key etc.), or empty list.
+
+        When stop_on_first_event is False, keeps polling for the full timeout
+        and accumulates unique events so callers can inspect multiple detections
+        during the same playback window.
         """
         start = time.time()
+        seen_event_ids = set()
+        collected_events = []
 
         while time.time() - start < timeout:
             events = self._query_events_after(stream_start_time)
-            if events:
-                log.info("  Found %d event(s) in database.", len(events))
-                for e in events:
+            new_events = [e for e in events if e["id"] not in seen_event_ids]
+
+            if new_events:
+                log.info("  Found %d new event(s) in database.", len(new_events))
+                for e in new_events:
+                    seen_event_ids.add(e["id"])
+                    collected_events.append(e)
                     log.info("    → %s (confidence=%s, theft_type=%s)",
                              e["video_s3_key"], e["match_confidence"], e["theft_type"])
-                return events
+                if stop_on_first_event:
+                    return collected_events
 
             remaining = timeout - (time.time() - start)
             if remaining <= 0:
                 break
             wait = min(config.POLL_INTERVAL, remaining)
-            log.info("  No events yet. Polling DB in %.0fs (%.0fs left)…", wait, remaining)
+            if collected_events:
+                log.debug(
+                    "  %d event(s) seen so far. Polling DB again in %.0fs (%.0fs left)…",
+                    len(collected_events), wait, remaining,
+                )
+            else:
+                log.debug("  No events yet. Polling DB in %.0fs (%.0fs left)…", wait, remaining)
             time.sleep(wait)
+
+        if collected_events:
+            log.info("  Polling window ended with %d event(s) found.", len(collected_events))
+            return collected_events
 
         log.info("  Timeout — no events found in database for this video.")
         return []

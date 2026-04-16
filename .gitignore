@@ -1,4 +1,7 @@
-config.py
+config**.py
 test_videos/
 test_results.xlsx
-/__pycache__/
+**/__pycache__/**
+logs/**
+test.py
+playlist.txt

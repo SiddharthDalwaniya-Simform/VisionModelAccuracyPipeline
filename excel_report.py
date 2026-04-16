@@ -5,7 +5,8 @@ Writes one row per video with color-coded status.
 Green = PASS, Red = NO EVENT, Yellow = MISMATCH.
 """
 
-import logging
+
+import logging 
 import os
 from datetime import datetime
 
@@ -20,6 +21,7 @@ log = logging.getLogger("excel")
 GREEN = PatternFill("solid", fgColor="C6EFCE")
 RED = PatternFill("solid", fgColor="FFC7CE")
 YELLOW = PatternFill("solid", fgColor="FFEB9C")
+ORANGE = PatternFill("solid", fgColor="FF8C00")  # connection failures
 HEADER_FILL = PatternFill("solid", fgColor="2F5496")
 HEADER_FONT = Font(bold=True, size=12, color="FFFFFF", name="Arial")
 DATA_FONT = Font(name="Arial", size=11)
@@ -95,10 +97,13 @@ class ExcelReport:
         match_result,
         match_ratio: float,
         notes: str = "",
+        force_status: str = None,
     ):
         row = self._start_row + (sr_no - 1)
 
-        if event_received and match_result:
+        if force_status:
+            status, status_fill = force_status, ORANGE
+        elif event_received and match_result:
             status, status_fill = "PASS", GREEN
         elif event_received and not match_result:
             status, status_fill = "MISMATCH", YELLOW
@@ -130,7 +135,7 @@ class ExcelReport:
         self.wb.save(self.path)
         log.info("  Excel row %d → %s", row, status)
 
-    def add_summary(self, total: int, passed: int, missed: int, mismatched: int):
+    def add_summary(self, total: int, passed: int, missed: int, mismatched: int, execution_time: str = ""):
         last_data_row = self._start_row + total - 1
         row = last_data_row + 2
         bold = Font(bold=True, name="Arial", size=12)
@@ -150,6 +155,8 @@ class ExcelReport:
         self.ws.cell(row=row + 5, column=1, value="Detection Rate")
         self.ws.cell(row=row + 5, column=2, value=f"=B{row+2}/B{row+1}*100")
         self.ws.cell(row=row + 5, column=2).number_format = '0.0"%"'
+        self.ws.cell(row=row + 6, column=1, value="Total Execution Time")
+        self.ws.cell(row=row + 6, column=2, value=execution_time)
 
         self.wb.save(self.path)
         log.info("Summary added to Excel.")
