@@ -5,3 +5,4 @@ test_results.xlsx
 logs/**
 test.py
 playlist.txt
+/envs/**
