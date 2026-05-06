@@ -1,6 +1,7 @@
 config*.py
 !config.py
-test_videos/
+test_videos/*
+!test_videos/.gitkeep
 test_results.xlsx
 **/__pycache__/**
 logs/**
