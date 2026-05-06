@@ -8,3 +8,5 @@ logs/**
 test.py
 playlist.txt
 /envs/**
+!/envs/__init__.py
+!/envs/*.example.py
