@@ -7,6 +7,9 @@ test_results.xlsx
 logs/**
 test.py
 playlist.txt
-/envs/**
+/envs/*.py
 !/envs/__init__.py
-!/envs/*.example.py
+!/envs/base.py
+!/envs/dev.py
+!/envs/stage.py
+!/envs/prod.py

@@ -2,17 +2,14 @@
 # STAGE ENVIRONMENT CONFIG
 # ============================================================
 # Inherits shared defaults from base.py, overrides stage-specific values.
-#
-# HOW TO USE:
-#   Copy this file to stage.py and fill in the values marked CHANGE_ME.
-# ============================================================
+# TODO: Update the values below with your staging environment credentials.
 
 from envs.base import *  # noqa: F401,F403
 
 # --- DATABASE (PostgreSQL via SSH Tunnel) ---
 DB_HOST = "CHANGE_ME"
 # RDS endpoint for staging. Example: "stage-db.xxxx.eu-central-1.rds.amazonaws.com"
-DB_PORT = 0  # CHANGE_ME — PostgreSQL port
+DB_PORT = 0  # CHANGE_ME
 DB_NAME = "CHANGE_ME"
 DB_USER = "CHANGE_ME"
 DB_PASSWORD = "CHANGE_ME"
@@ -26,14 +23,13 @@ SSH_TUNNEL_PEM = r"CHANGE_ME"
 # Full path to your .pem key file. Example: r"C:\Users\you\Downloads\stage-key.pem"
 
 DB_TABLE = "theft_event"
-DB_CAMERA_ID = 0  # CHANGE_ME — camera_id used for stage tests in the database
+DB_CAMERA_ID = 0  # CHANGE_ME
 
-# --- S3 ---
+# --- S3 + AWS ---
 S3_BUCKET = "CHANGE_ME"
-# The S3 bucket where the staging ML pipeline stores event clips.
 AWS_ACCESS_KEY_ID = "CHANGE_ME"
 AWS_SECRET_ACCESS_KEY = "CHANGE_ME"
-AWS_REGION = "eu-central-1"
+AWS_REGION = "CHANGE_ME"
 
 # --- STREAMING ---
 TUNNEL_NAME = "CHANGE_ME"

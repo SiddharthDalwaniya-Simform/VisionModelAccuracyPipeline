@@ -3,12 +3,6 @@
 # ============================================================
 # Environment-specific files (dev.py, stage.py, prod.py) import
 # these and override only what differs per environment.
-#
-# HOW TO USE:
-#   1. Copy this file to base.py  (remove the .example part)
-#   2. Fill in the values marked CHANGE_ME
-#   3. Do the same for dev.example.py, stage.example.py, prod.example.py
-# ============================================================
 
 # --- YOUR VIDEOS ---
 VIDEO_DIR = r"CHANGE_ME"
@@ -29,13 +23,10 @@ HLS_TRANSCODE = True
 
 # --- TIMING ---
 WAIT_MULTIPLIER = 2.0
-# Total poll time = video_duration × this. Increase for slow ML pipelines.
 EXTRA_WAIT = 30.0
-# Additional seconds to keep polling after video ends.
 POLL_INTERVAL = 10.0
-# How often to poll the database (seconds).
 
-# --- AWS ---
+# --- AWS ---    
 # Set per-environment in dev.py / stage.py / prod.py.
 # Leave as None to fall back to ~/.aws/credentials or instance profile.
 AWS_ACCESS_KEY_ID = None
