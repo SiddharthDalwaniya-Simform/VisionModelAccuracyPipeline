@@ -7,6 +7,10 @@ test_results.xlsx
 logs/**
 test.py
 playlist.txt
+# envs/*.py are tracked as skeletons (CHANGE_ME placeholders).
+# After filling in real credentials, run:
+#   git update-index --skip-worktree envs/base.py envs/dev.py envs/stage.py envs/prod.py
+# This prevents accidental pushes of real secrets.
 /envs/*.py
 !/envs/__init__.py
 !/envs/base.py

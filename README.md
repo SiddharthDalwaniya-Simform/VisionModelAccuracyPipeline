@@ -57,6 +57,33 @@ envs/
 pip install -r requirements.txt
 ```
 
+### Configure Environment Files
+
+The `envs/` folder contains skeleton config files with `CHANGE_ME` placeholders. Fill in your actual values:
+
+```
+envs/base.py    ← video paths, HLS output dir, AWS region, timing
+envs/dev.py     ← dev DB, SSH tunnel, S3 bucket, stream URL
+envs/stage.py   ← stage DB, SSH tunnel, S3 bucket, stream URL
+envs/prod.py    ← prod DB, SSH tunnel, S3 bucket, stream URL
+```
+
+After filling in your credentials, **protect them from accidental commits** by running once:
+
+```bash
+git update-index --skip-worktree envs/base.py envs/dev.py envs/stage.py envs/prod.py
+```
+
+This tells Git to ignore local changes to those files permanently. Your credentials will never be staged or pushed by accident.
+
+To temporarily re-enable tracking (e.g. to push a legitimate skeleton update):
+
+```bash
+git update-index --no-skip-worktree envs/dev.py
+# make changes, commit, push
+git update-index --skip-worktree envs/dev.py
+```
+
 ### Prerequisites
 
 - **Python 3.8+**
