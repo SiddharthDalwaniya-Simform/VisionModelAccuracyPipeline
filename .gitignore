@@ -1,4 +1,5 @@
-config**.py
+config*.py
+!config.py
 test_videos/
 test_results.xlsx
 **/__pycache__/**
