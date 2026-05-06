@@ -17,8 +17,8 @@ DB_PASSWORD = "CHANGE_ME"
 # --- SSH TUNNEL ---
 SSH_TUNNEL_HOST = "CHANGE_ME"
 # IP or hostname of the staging bastion EC2 instance.
-SSH_TUNNEL_PORT = 22
-SSH_TUNNEL_USER = "ec2-user"
+SSH_TUNNEL_PORT = 0  # CHANGE_ME
+SSH_TUNNEL_USER = "CHANGE_ME"
 SSH_TUNNEL_PEM = r"CHANGE_ME"
 # Full path to your .pem key file. Example: r"C:\Users\you\Downloads\stage-key.pem"
 
