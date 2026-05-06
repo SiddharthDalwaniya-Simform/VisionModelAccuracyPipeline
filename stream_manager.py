@@ -15,7 +15,10 @@ import os
 import subprocess
 import sys
 import time
+import threading
 import urllib.request
+from datetime import datetime
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import config
@@ -27,7 +30,8 @@ class StreamManager:
 
     def __init__(self):
         self.ffmpeg_proc = None
-        self.http_proc = None
+        self.http_server = None
+        self.http_thread = None
         self.tunnel_proc = None
 
     # =================================================================
@@ -62,28 +66,44 @@ class StreamManager:
     # =================================================================
 
     def start_http_server(self):
-        """Start Python HTTP server serving the HLS directory."""
+        """Start a threaded HTTP server serving the HLS directory."""
         # Check if something is already running on the port
         if self._is_port_in_use(config.HTTP_PORT):
             log.info("HTTP server already running on port %d — skipping start.",
                      config.HTTP_PORT)
             return
 
-        self.http_proc = subprocess.Popen(
-            [sys.executable, "-m", "http.server", str(config.HTTP_PORT)],
-            cwd=config.HLS_OUTPUT_DIR,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        time.sleep(2)
+        class _HLSHandler(SimpleHTTPRequestHandler):
+            """Serves HLS files with correct MIME types and CORS headers."""
 
-        if self.http_proc.poll() is not None:
-            log.error("HTTP server failed to start! Check if port %d is free.",
-                      config.HTTP_PORT)
-            raise RuntimeError(f"HTTP server failed on port {config.HTTP_PORT}")
+            extensions_map = {
+                **SimpleHTTPRequestHandler.extensions_map,
+                ".m3u8": "application/vnd.apple.mpegurl",
+                ".ts": "video/mp2t",
+            }
 
-        log.info("HTTP server started on port %d (PID %d)",
-                 config.HTTP_PORT, self.http_proc.pid)
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, directory=config.HLS_OUTPUT_DIR, **kwargs)
+
+            def end_headers(self):
+                self.send_header("Access-Control-Allow-Origin", "*")
+                if self.path.endswith(".m3u8"):
+                    self.send_header("Cache-Control",
+                                     "no-cache, no-store, must-revalidate")
+                super().end_headers()
+
+            def log_message(self, format, *args):
+                pass  # suppress per-request noise
+
+        self.http_server = ThreadingHTTPServer(("0.0.0.0", config.HTTP_PORT),
+                                               _HLSHandler)
+        self.http_thread = threading.Thread(target=self.http_server.serve_forever,
+                                            daemon=True)
+        self.http_thread.start()
+        time.sleep(1)
+
+        log.info("HTTP server started on port %d (threaded, serving %s)",
+                 config.HTTP_PORT, config.HLS_OUTPUT_DIR)
 
     def _is_port_in_use(self, port: int) -> bool:
         """Check if a port is already in use."""
@@ -166,32 +186,144 @@ class StreamManager:
     def start_ffmpeg(self):
         """
         Start ffmpeg: reads playlist.txt → HLS output.
-        Same command as your .bat, minus -stream_loop.
+
+        Source videos are HEVC which VLC cannot play via HLS, so we
+        transcode to H.264.  All other settings match the proven
+        streaming command for smooth, gap-free playback.
         """
-        hls_path = os.path.join(config.HLS_OUTPUT_DIR, "cctv.m3u8")
+        hls_path = os.path.join(config.HLS_OUTPUT_DIR, config.HLS_PLAYLIST_NAME)
 
         cmd = [
             "ffmpeg",
             "-re",
             "-f", "concat",
             "-safe", "0",
-            "-i", config.PLAYLIST_PATH,
+            "-i", os.path.abspath(config.PLAYLIST_PATH),
             "-fflags", "+genpts",
             "-avoid_negative_ts", "make_zero",
-            "-c:v", "copy",
-            "-c:a", "copy",
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-tune", "zerolatency",
+            "-pix_fmt", "yuv420p",
+            "-vf", "scale=-2:720",
+            "-c:a", "aac",
             "-f", "hls",
             "-hls_time", "2",
             "-hls_list_size", "20",
-            "-hls_flags", "append_list+omit_endlist",
+            "-hls_flags", "delete_segments+omit_endlist",
             hls_path,
         ]
 
+        log.debug("  ffmpeg cmd: %s", " ".join(cmd))
+
+        # stderr goes to a temp file so we can read it on failure without
+        # blocking ffmpeg (piped stderr fills up and stalls the process).
+        self._ffmpeg_log = os.path.join(config.HLS_OUTPUT_DIR, "ffmpeg.log")
+        self._ffmpeg_log_fh = open(self._ffmpeg_log, "w")
         self.ffmpeg_proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cmd, stdout=subprocess.DEVNULL, stderr=self._ffmpeg_log_fh,
         )
-        log.info("  ffmpeg started (PID %d)", self.ffmpeg_proc.pid)
+        log.info("  ffmpeg started (PID %d) — transcoding HEVC→H.264 HLS…",
+                 self.ffmpeg_proc.pid)
         time.sleep(config.SETTLE_TIME)
+
+        # Fail fast — read stderr and raise if ffmpeg already died
+        if self.ffmpeg_proc.poll() is not None:
+            self._ffmpeg_log_fh.close()
+            err_msg = Path(self._ffmpeg_log).read_text(errors="replace").strip()[-1500:]
+            log.error("ffmpeg failed to start HLS stream.")
+            log.error("ffmpeg stderr:\n%s", err_msg)
+            raise RuntimeError("ffmpeg failed to generate HLS output")
+
+        if not os.path.exists(hls_path) or os.path.getsize(hls_path) == 0:
+            log.warning("  HLS playlist not yet populated after %.0fs — waiting for first segment…", config.SETTLE_TIME)
+            # HEVC→H.264 transcode of the first 2-second segment from a
+            # high-res source (2592×1944) can take 20-30s.  Wait patiently.
+            for _ in range(60):
+                time.sleep(1)
+                if os.path.exists(hls_path) and os.path.getsize(hls_path) > 0:
+                    break
+                if self.ffmpeg_proc.poll() is not None:
+                    break
+
+            if not os.path.exists(hls_path) or os.path.getsize(hls_path) == 0:
+                if self.ffmpeg_proc.poll() is not None:
+                    self._ffmpeg_log_fh.close()
+                    err_msg = Path(self._ffmpeg_log).read_text(errors="replace").strip()[-1500:]
+                    log.error("ffmpeg exited before producing segments.")
+                    log.error("ffmpeg stderr:\n%s", err_msg)
+                    raise RuntimeError("ffmpeg failed to generate HLS output")
+                else:
+                    log.error("HLS playlist still empty after 60s — ffmpeg may be stuck.")
+                    raise RuntimeError("HLS playlist not populated by ffmpeg")
+
+        log.info("  HLS playlist ready: %s", hls_path)
+        log.info("  Local stream:  http://127.0.0.1:%d/%s", config.HTTP_PORT, config.HLS_PLAYLIST_NAME)
+        log.info("  Public stream: https://%s/%s", config.STREAM_URL, config.HLS_PLAYLIST_NAME)
+
+        # Return the moment the stream became available — callers use this
+        # as the anchor for DB polling so it's in sync with actual playback.
+        stream_ready_time = datetime.utcnow()
+        log.info("  Stream ready at %s UTC", stream_ready_time.strftime("%H:%M:%S"))
+        return stream_ready_time
+
+    def wait_for_stream_accessible(self, timeout: float = 60.0) -> datetime:
+        """
+        Wait until the first HLS segment is confirmed via the local HTTP
+        server.  This is the "first frame visible" gate — DB polling must
+        not start until this returns.
+
+        Checks the local HTTP endpoint (fast, reliable) instead of the
+        public Cloudflare tunnel URL which may be behind access policies.
+        A non-blocking tunnel diagnostic check runs in the background.
+
+        Returns the UTC datetime when the first segment was confirmed.
+        """
+        local_url = f"http://127.0.0.1:{config.HTTP_PORT}/{config.HLS_PLAYLIST_NAME}"
+        log.info("  Waiting for first HLS segment (local): %s", local_url)
+
+        start = time.time()
+        last_err = None
+        while time.time() - start < timeout:
+            try:
+                resp = urllib.request.urlopen(local_url, timeout=5)
+                body = resp.read().decode(errors="replace")
+                # #EXTINF means at least one .ts segment with video data
+                if "#EXTINF" in body:
+                    accessible_time = datetime.utcnow()
+                    log.info("  ✓ First segment confirmed at %s UTC (took %.1fs)",
+                             accessible_time.strftime("%H:%M:%S"),
+                             time.time() - start)
+                    # Background tunnel check (non-blocking, diagnostic only)
+                    self._check_tunnel_async()
+                    return accessible_time
+                last_err = "Playlist has no segments yet"
+            except Exception as exc:
+                last_err = str(exc)
+            time.sleep(1)
+
+        log.warning("  First segment not confirmed after %.0fs: %s", timeout, last_err)
+        log.warning("  Falling back to current time as stream start.")
+        return datetime.utcnow()
+
+    def _check_tunnel_async(self):
+        """Non-blocking diagnostic check of the public tunnel URL."""
+        def _check():
+            url = f"https://{config.STREAM_URL}/{config.HLS_PLAYLIST_NAME}"
+            try:
+                resp = urllib.request.urlopen(url, timeout=10)
+                body = resp.read().decode(errors="replace")
+                if "#EXTINF" in body:
+                    log.info("  Tunnel stream also accessible.")
+                else:
+                    log.warning("  Tunnel reachable but no HLS segments yet.")
+            except Exception as exc:
+                log.warning("  Tunnel diagnostic: %s (ML model may use different auth)", exc)
+        threading.Thread(target=_check, daemon=True).start()
+
+    def is_ffmpeg_running(self) -> bool:
+        """True if ffmpeg is alive (video still playing)."""
+        return self.ffmpeg_proc is not None and self.ffmpeg_proc.poll() is None
 
     def stop_ffmpeg(self):
         """Stop the current ffmpeg process."""
@@ -203,6 +335,9 @@ class StreamManager:
                 self.ffmpeg_proc.kill()
                 self.ffmpeg_proc.wait()
             log.info("  ffmpeg stopped.")
+        if hasattr(self, "_ffmpeg_log_fh") and self._ffmpeg_log_fh:
+            self._ffmpeg_log_fh.close()
+            self._ffmpeg_log_fh = None
 
     # =================================================================
     # Lifecycle
@@ -224,14 +359,16 @@ class StreamManager:
             raise RuntimeError("Cloudflare Tunnel is not healthy")
 
         log.info("-" * 40)
-        log.info("All services running. Stream URL: https://%s/", config.STREAM_URL)
+        log.info("All services running.")
+        log.info("Local VLC URL:  http://127.0.0.1:%d/%s", config.HTTP_PORT, config.HLS_PLAYLIST_NAME)
+        log.info("Public VLC URL: https://%s/%s", config.STREAM_URL, config.HLS_PLAYLIST_NAME)
         log.info("")
 
     def stop_all(self):
         """Stop everything: ffmpeg, HTTP server, tunnel."""
         self.stop_ffmpeg()
-        if self.http_proc and self.http_proc.poll() is None:
-            self.http_proc.terminate()
+        if self.http_server:
+            self.http_server.shutdown()
             log.info("HTTP server stopped.")
         if self.tunnel_proc and self.tunnel_proc.poll() is None:
             self.tunnel_proc.terminate()

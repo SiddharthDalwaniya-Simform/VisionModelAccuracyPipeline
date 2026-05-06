@@ -177,26 +177,34 @@ def run(skip_services=False, dry_run=False):
             # ---- 1. Write video to playlist and start ffmpeg ----
             stream.clean_between_videos()
             stream.write_playlist(video_path)
-            stream_start_time = datetime.utcnow()
             stream.start_ffmpeg()
 
-            buffer = duration * (config.WAIT_MULTIPLIER - 1)
+            # Gate on first frame: wait until the local HLS server has
+            # at least one .ts segment before starting DB polling.
+            stream_start_time = stream.wait_for_stream_accessible()
+            log.info("  Stream start time (first frame): %s UTC",
+                     stream_start_time.strftime("%H:%M:%S"))
+
             # ---- 2. Poll database while the video is playing ----
-            log.info("  Checking database while video plays (up to %.0fs)…", duration)
+            # Polling is tied to ffmpeg lifecycle via stop_check:
+            # it ends automatically when ffmpeg exits (video finished).
+            log.info("  Polling DB during playback (≈%.0fs video)…", duration)
             new_events = s3.check_for_events(
                 stream_start_time=stream_start_time,
-                timeout=duration,
+                timeout=duration + 30,  # generous cap; stop_check ends it sooner
                 stop_on_first_event=False,
+                stop_check=lambda: not stream.is_ffmpeg_running(),
             )
 
-            # ---- 3. If playback had no events, continue through cooldown ----
+            # ---- 3. If no events during playback, cooldown poll ----
             if new_events:
-                log.info("  Event detected during playback — skipping cooldown period.")
-            elif buffer > 0:
-                log.info("  No events during playback. Checking through cooldown for %.0fs…", buffer)
+                log.info("  Event detected during playback — skipping cooldown.")
+            else:
+                cooldown = duration  # total ≈ 2× video length
+                log.info("  No events during playback. Cooldown poll for %.0fs…", cooldown)
                 new_events = s3.check_for_events(
                     stream_start_time=stream_start_time,
-                    timeout=buffer,
+                    timeout=cooldown,
                 )
 
             # ---- 4. Process results ----
@@ -218,23 +226,27 @@ def run(skip_services=False, dry_run=False):
                 if len(new_events) > 1:
                     notes += f" ({len(new_events)} events; verified first)"
 
-                # Download and pHash verify
-                tmp_dir = tempfile.mkdtemp(prefix="event_")
-                try:
-                    local_clip = s3.download_clip(s3_key, tmp_dir)
-                    match_result, match_ratio = match_clip_to_video(
-                        local_clip, video_path
-                    )
+                # Download and pHash verify (only when matching is enabled)
+                if config.ENABLE_VIDEO_MATCHING:
+                    tmp_dir = tempfile.mkdtemp(prefix="event_")
+                    try:
+                        local_clip = s3.download_clip(s3_key, tmp_dir)
+                        match_result, match_ratio = match_clip_to_video(
+                            local_clip, video_path
+                        )
 
-                    if match_result:
-                        log.info("  ✔ MATCH (ratio=%.2f)", match_ratio)
-                        passed += 1
-                    else:
-                        log.info("  ✘ MISMATCH (ratio=%.2f)", match_ratio)
-                        mismatched += 1
-                        notes += f" ratio={match_ratio:.2f}"
-                finally:
-                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                        if match_result:
+                            log.info("  ✔ MATCH (ratio=%.2f)", match_ratio)
+                            passed += 1
+                        else:
+                            log.info("  ✘ MISMATCH (ratio=%.2f)", match_ratio)
+                            mismatched += 1
+                            notes += f" ratio={match_ratio:.2f}"
+                    finally:
+                        shutil.rmtree(tmp_dir, ignore_errors=True)
+                else:
+                    log.info("  Video matching disabled — counting event as PASS.")
+                    passed += 1
             else:
                 log.info("  ✘ NO EVENT")
                 missed += 1

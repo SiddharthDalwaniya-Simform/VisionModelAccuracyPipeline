@@ -167,6 +167,7 @@ class S3EventChecker:
         stream_start_time: datetime,
         timeout: float,
         stop_on_first_event: bool = True,
+        stop_check: callable = None,
     ) -> list[dict]:
         """
         Poll the database for events created after stream_start_time.
@@ -176,6 +177,11 @@ class S3EventChecker:
         When stop_on_first_event is False, keeps polling for the full timeout
         and accumulates unique events so callers can inspect multiple detections
         during the same playback window.
+
+        When stop_check is provided, it is called each cycle; if it returns
+        True the polling stops early (after one final DB sweep).  Used to
+        tie polling to the ffmpeg lifecycle — polling ends when the video
+        finishes playing.
         """
         start = time.time()
         seen_event_ids = set()
@@ -194,6 +200,19 @@ class S3EventChecker:
                              e["video_s3_key"], e["match_confidence"], e["theft_type"])
                 if stop_on_first_event:
                     return collected_events
+
+            # If external condition says stop (e.g. video playback ended),
+            # do one final sweep and return.
+            if stop_check and stop_check():
+                log.info("  Video playback ended — final event sweep.")
+                events = self._query_events_after(stream_start_time)
+                for e in events:
+                    if e["id"] not in seen_event_ids:
+                        seen_event_ids.add(e["id"])
+                        collected_events.append(e)
+                        log.info("    → %s (confidence=%s, theft_type=%s)",
+                                 e["video_s3_key"], e["match_confidence"], e["theft_type"])
+                break
 
             remaining = timeout - (time.time() - start)
             if remaining <= 0:
